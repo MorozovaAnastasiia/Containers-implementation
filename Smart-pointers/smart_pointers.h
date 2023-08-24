@@ -1,335 +1,253 @@
-#pragma once
-
 #include <iostream>
 #include <memory>
-#include <string>
-#include <type_traits>
-#include <typeinfo>
+#include <vector>
 
-struct BaseCB {
-    BaseCB() = default;
-    virtual void mainDel() = 0;
-    int shc = 0;
-    int weakc = 0;
-    virtual void BDel() = 0;
-    virtual void* getPtr() = 0;
-    virtual ~BaseCB() = default;
+template <typename T> class SharedPtr;
+template <typename T> class WeakPtr;
+
+// for debug
+bool flag = false;
+template<typename T>
+void D(const T& mess) { if (flag) std::cout << "DEB " << mess << std::endl; }
+
+struct BaseControlBlock {
+  int shared_count = 0;
+  int weak_count = 0;
+  BaseControlBlock(int sc, int wc) : shared_count(sc), weak_count(wc) {}
+  
+  virtual void useDeleter(void *ptr) = 0;
+  virtual void Deallocate() = 0;
 };
 
-template <typename U>
-class SharedPtr {
-    template <typename Y, typename... Args>
-    friend SharedPtr<Y> makeShared(Args&&... args);
-    template <typename Y, typename Alloc, typename... Args>
-    friend SharedPtr<Y> allocateShared(Alloc alloc, Args&&... args);
-    template <typename Y>
-    friend class WeakPtr;
+template <typename T, typename Allocator, typename Deleter = std::false_type>
+struct AllocControlBlock : public BaseControlBlock {
+  [[no_unique_address]] Allocator allocator; 
+  [[no_unique_address]] Deleter deleter;
 
-    template <typename Y>
-    friend class SharedPtr;
+  using AT_base = std::allocator_traits<Allocator>;
 
-    template <typename Y, typename Deleter, typename Alloc>
-    struct UsualCB : BaseCB {
-      private:
-        using BlockAlloc = typename std::allocator_traits<
-            Alloc>::template rebind_alloc<UsualCB<Y, Deleter, Alloc>>;
-        using BlockAllocTraits = typename std::allocator_traits<BlockAlloc>;
-        Y* ptr;
-        Alloc alloc;
-        Deleter deleter;
+  AllocControlBlock(int int1, int int2, const Allocator &a, const Deleter &d)
+      : BaseControlBlock(int1, int2), allocator(a), deleter(d) {}
 
-      public:
-        UsualCB(Y* ptr, Deleter del, Alloc alloc)
-            : ptr(ptr), alloc(alloc), deleter(del) {}
-
-        void mainDel() override {
-            deleter(ptr);
-            ptr = nullptr;
-        }
-
-        void* getPtr() override {
-            return ptr;
-        }
-
-        void BDel() override {
-            auto ths = this;
-            BlockAlloc newal = std::move(alloc);
-            BlockAllocTraits::deallocate(newal, ths, 1);
-        }
-        ~UsualCB() override {}
-    };
-
-    template <typename Alloc>
-    struct MakeSharedCB : BaseCB {
-      private:
-        Alloc alloc;
-        U obj;
-        using CusAlloc =
-            typename std::allocator_traits<Alloc>::template rebind_alloc<U>;
-        using CusTraits = typename std::allocator_traits<CusAlloc>;
-
-      public:
-        using BlockAlloc = typename std::allocator_traits<
-            Alloc>::template rebind_alloc<MakeSharedCB<Alloc>>;
-        using BlockAllocTraits = typename std::allocator_traits<BlockAlloc>;
-
-        template <typename... Args>
-        MakeSharedCB(Alloc alloc, Args&&... args)
-            : alloc(alloc), obj(std::forward<Args>(args)...) {}
-
-        void BDel() override {
-            auto ths = this;
-            BlockAlloc newal = std::move(alloc);
-            BlockAllocTraits::deallocate(newal, ths, 1);
-        }
-
-        void* getPtr() override {
-            return &obj;
-        }
-
-        void mainDel() override {
-            CusAlloc AnotherAlloc(alloc);
-            CusTraits::destroy(AnotherAlloc, &obj);
-        }
-        ~MakeSharedCB() override {}
-    };
-
-    BaseCB* cblock = nullptr;
-
-    SharedPtr(BaseCB* cblock) : cblock(cblock) {
-        if (cblock != nullptr) {
-            this->cblock->shc++;
-        }
+  virtual void useDeleter(void *ptr_tmp) final {
+    T* ptr = static_cast<T*>(ptr_tmp);
+    if constexpr (std::is_same_v<Deleter, std::false_type>) {
+      AT_base::destroy(allocator, ptr);
+      
+    } else {
+      deleter(ptr);
     }
+  }
 
-  public:
-    SharedPtr() = default;
-
-    template <typename Y, typename Deleter = std::default_delete<Y>,
-              typename Alloc = std::allocator<Y>>
-    SharedPtr(Y* ptr, Deleter dlt = Deleter(), Alloc alloc = Alloc()) {
-        using BlockAlloc = typename std::allocator_traits<
-            Alloc>::template rebind_alloc<UsualCB<Y, Deleter, Alloc>>;
-        using BlockAllocTraits = typename std::allocator_traits<BlockAlloc>;
-        BlockAlloc nwAlloc = alloc;
-        auto newptr = BlockAllocTraits::allocate(nwAlloc, 1);
-        ::new (newptr) UsualCB<Y, Deleter, Alloc>(ptr, dlt, alloc);
-        this->cblock = newptr;
-        this->cblock->shc++;
-    }
-
-    SharedPtr(const SharedPtr& other) : cblock(other.cblock) {
-        if (cblock != nullptr) {
-            cblock->shc++;
-        }
-    }
-
-    template <typename Y>
-    SharedPtr(const SharedPtr<Y>& other) : cblock(other.cblock) {
-        if (cblock != nullptr) {
-            cblock->shc++;
-        }
-    }
-
-    SharedPtr(SharedPtr&& other) : cblock(other.cblock) {
-        other.cblock = nullptr;
-    }
-
-    template <typename Y>
-    SharedPtr(SharedPtr<Y>&& other) : cblock(other.cblock) {
-        other.cblock = nullptr;
-    }
-
-    void swap(SharedPtr<U>& other) {
-        std::swap(cblock, other.cblock);
-    }
-
-    ~SharedPtr() {
-        if (cblock != nullptr) {
-            cblock->shc--;
-            if (cblock->shc == 0) {
-                cblock->mainDel();
-                if (cblock->weakc == 0) {
-                    cblock->BDel();
-                    cblock = nullptr;
-                }
-            }
-        }
-    }
-
-    SharedPtr<U>& operator=(const SharedPtr<U>& other) {
-        if (this == &other) {
-            return *this;
-        }
-        SharedPtr<U> copy(other);
-        swap(copy);
-        return *this;
-    }
-
-    template <typename Y>
-    SharedPtr<U>& operator=(const SharedPtr<Y>& other) {
-        SharedPtr<U> copy(other);
-        swap(copy);
-        return *this;
-    }
-
-    SharedPtr<U>& operator=(SharedPtr<U>&& other) {
-        SharedPtr<U> copy(std::move(other));
-        swap(copy);
-        return *this;
-    }
-
-    template <typename Y>
-    SharedPtr<U>& operator=(SharedPtr<Y>&& other) {
-        SharedPtr<U> copy(std::move(other));
-        swap(copy);
-        return *this;
-    }
-
-    U* get() const {
-        if (cblock == nullptr) {
-            return nullptr;
-        }
-        return static_cast<U*>(cblock->getPtr());
-    }
-
-    U& operator*() const {
-        return *(get());
-    }
-    U* operator->() const {
-        return get();
-    }
-
-    size_t use_count() const {
-        if (cblock == nullptr) {
-            return 0;
-        }
-        return cblock->shc;
-    }
-    template <typename Y>
-    void reset(Y* ptr) {
-        SharedPtr<U> copy(ptr);
-        swap(copy);
-    }
-
-    void reset() {
-        SharedPtr<U> to;
-        swap(to);
-    }
+  virtual void Deallocate() {
+    using Alloc_this =
+        typename AT_base::template rebind_alloc<AllocControlBlock>;
+    using AT = std::allocator_traits<Alloc_this>;
+    Alloc_this alloc_tmp(std::move(allocator));
+    AT::deallocate(alloc_tmp, this, 1);
+  }
 };
 
-template <typename Y, typename Alloc, typename... Args>
-SharedPtr<Y> allocateShared(Alloc alloc, Args&&... args) {
-    using ControlBlock = typename SharedPtr<Y>::template MakeSharedCB<Alloc>;
-    using BlockAlloc =
-        typename SharedPtr<Y>::template MakeSharedCB<Alloc>::BlockAlloc;
-    BlockAlloc ballocator = alloc;
+template <typename T, typename Allocator, typename Deleter>
+struct ControlBlockRegular: public AllocControlBlock<T, Allocator, Deleter> {
+  bool boolarr[sizeof(T)];
+  using Parent = AllocControlBlock<T, Allocator, Deleter>;
+  using Parent::allocator;
+  using Parent::deleter;
+  using AT_base = std::allocator_traits<Allocator>;
 
-    ControlBlock* blockPtr =
-        ControlBlock::BlockAllocTraits::allocate(ballocator, 1);
-    ControlBlock::BlockAllocTraits::construct(ballocator, blockPtr, alloc,
-                                              std::forward<Args>(args)...);
+  virtual void Deallocate() {
+    using Alloc_this =
+        typename AT_base::template rebind_alloc<ControlBlockRegular>;
+    using AT = std::allocator_traits<Alloc_this>;
+    Alloc_this alloc_tmp(std::move(allocator));
+    AT::deallocate(alloc_tmp, this, 1);
+  }
 
-    return SharedPtr<Y>(dynamic_cast<BaseCB*>(blockPtr));
+  template <typename... Args>
+  ControlBlockRegular(int int1, int int2, Allocator allocator_1, Deleter deleter_1, Args&&... args) : Parent(int1, int2, allocator_1, deleter_1) {
+    auto p = reinterpret_cast<T*>(boolarr);
+    AT_base::construct(allocator, p, std::forward<Args>(args)...);
+  }
+
+  T &getObject() const { return reinterpret_cast<T*>(boolarr); }
+};
+
+template <typename T> class SharedPtr {
+
+  template <typename U> friend class WeakPtr;
+  template <typename U> friend class SharedPtr;
+
+  T *ptr = nullptr;
+  BaseControlBlock *cb = nullptr;
+
+  SharedPtr(const WeakPtr<T> &wptr) : ptr(wptr.ptr), cb(wptr.cb) {
+    ++(cb->shared_count);
+  }
+
+public:
+  SharedPtr() {}
+
+  SharedPtr(const SharedPtr &other) : ptr(other.ptr), cb(other.cb) {
+    ++(cb->shared_count);
+  }
+
+  
+  template <typename U>
+  SharedPtr(const SharedPtr<U> &other) : ptr(other.ptr), cb(other.cb) {
+    ++(cb->shared_count);
+  }
+
+  template <typename U>
+  SharedPtr(SharedPtr<U> &&other) : ptr(other.ptr), cb(other.cb) {
+    other.ptr = nullptr;
+    other.cb = nullptr;
+  }
+
+  SharedPtr(T *ptr, BaseControlBlock *cb) : ptr(ptr), cb(cb) {}
+
+  SharedPtr(T *ptr) : ptr(ptr) {
+    auto local_alloc = std::allocator<T>();
+    auto local_deleter = std::false_type();
+    cb =
+        new AllocControlBlock<T, std::allocator<T>, std::false_type>(1, 0, local_alloc, local_deleter);
+  }
+
+  template <typename Deleter, typename Allocator = std::allocator<T>>
+  SharedPtr(T *ptr, Deleter deleter = {}, Allocator allocator = std::allocator<T>()): ptr(ptr) {
+    using ACB = AllocControlBlock<T,  Allocator,  Deleter>;
+    using AT = typename std::allocator_traits<Allocator>::template rebind_alloc<ACB>;
+    auto actual_alloc = AT();
+    auto cb_ptr = actual_alloc.allocate(1);
+    new (cb_ptr) ACB(1, 0, allocator, deleter); 
+    cb = cb_ptr;
+  }
+
+  SharedPtr &operator=(const SharedPtr &other) {
+    ptr = other.ptr;
+    cb = other.cb;
+    ++(cb->shared_count);
+    return *this;
+  }
+  SharedPtr &operator=(SharedPtr &&other) {
+    SharedPtr sh = std::move(other);
+    std::swap(ptr, sh.ptr);
+    std::swap(cb, sh.cb);
+    return *this;
+  }
+
+  void decrcount() {
+    if (!cb) return;
+    --(cb->shared_count);
+    if (cb->shared_count == 0) {
+      cb->useDeleter(ptr);
+      if (cb->weak_count == 0) {
+        cb->Deallocate();
+      }
+    }
+    ptr = nullptr;
+    cb = nullptr;
+  }
+
+  ~SharedPtr() { if (cb) {decrcount();} }
+
+  int use_count() const { return cb->shared_count; }
+
+  void reset(T *p = nullptr) {
+    if (cb) decrcount();
+    if (p != nullptr) {
+      *this = SharedPtr(p);
+    }
+  }
+
+  T &operator*() const { return *ptr; }
+  T *operator->() const { return ptr; }
+  T* get() const {return ptr;}
+
+  void swap(SharedPtr &other) {
+    std::swap(ptr, other.ptr);
+    std::swap(cb, other.cb);
+  }
+};
+
+template <typename T, typename... Args>
+SharedPtr<T> makeShared(Args &&...args) {
+   auto local_alloc = std::allocator<T>();
+    auto local_deleter = std::false_type();
+  auto cb1 = new ControlBlockRegular<T, std::allocator<T>, std::false_type>(
+      1, 0, local_alloc, local_deleter, std::forward<Args>(args)...);
+  auto cb2 = static_cast<BaseControlBlock*>(cb1);
+  return SharedPtr<T>(reinterpret_cast<T*>(&cb1->boolarr), cb2);
 }
 
-template <typename Y, typename... Args>
-SharedPtr<Y> makeShared(Args&&... args) {
-    return allocateShared<Y, std::allocator<Y>, Args...>(
-        std::allocator<Y>(), std::forward<Args>(args)...);
+template <typename T, typename Alloc, typename... Args>
+SharedPtr<T> allocateShared(const Alloc &alloc, Args &&...args) {
+  
+  using CBR = ControlBlockRegular<T, Alloc, std::false_type>;
+  using CBAlloc = typename std::allocator_traits<Alloc>::template rebind_alloc<CBR>;
+  using AT = typename std::allocator_traits<CBAlloc>;
+  auto tmp_alloc = CBAlloc(alloc);
+  auto cb1 = AT::allocate(tmp_alloc, 1);
+  new (cb1) CBR(1, 0, std::move(tmp_alloc), std::false_type(), std::forward<Args>(args)...);
+  //AT::construct(alloc, &cb1->object, std::forward<Args>(args)...);
+  auto cb2 = static_cast<BaseControlBlock*>(cb1);
+  return SharedPtr<T>(reinterpret_cast<T*>(&cb1->boolarr), (cb2));
+  
 }
-template <typename U>
-class WeakPtr {
-  private:
-    BaseCB* ptr = nullptr;
-    template <typename Y>
-    friend class WeakPtr;
 
-  public:
-    void swap(WeakPtr& other) {
-        std::swap(ptr, other.ptr);
+template <typename T> class WeakPtr {
+  template <typename U> friend class SharedPtr;
+  template <typename U> friend class WeakPtr;
+
+  T *ptr;
+  BaseControlBlock *cb;
+
+public:
+  WeakPtr() {}
+
+  WeakPtr(const WeakPtr& other) : ptr(other.ptr), cb(other.cb) {
+     ++(cb->weak_count);
+  }
+
+  template <typename U>
+  WeakPtr(const SharedPtr<U> &other) : ptr(other.ptr), cb(other.cb) {
+    ++(cb->weak_count);
+  }
+  template <typename U>
+  WeakPtr(const WeakPtr<U> &other) : ptr(other.ptr), cb(other.cb) {
+    ++(cb->weak_count);
+  }
+  template <typename U>
+  WeakPtr(WeakPtr<U> &&other) : ptr(other.ptr), cb(other.cb) {
+    other.ptr = nullptr;
+    other.cb = nullptr;
+  }
+
+  WeakPtr &operator=(const WeakPtr &other) {
+    ptr = other.ptr;
+    cb = other.cb;
+    ++(cb->weak_count);
+    return *this;
+  }
+  WeakPtr &operator=(WeakPtr<T> &&other) {
+    ptr = other.ptr;
+    cb = other.cb;
+    other.ptr = nullptr;
+    other.cb = nullptr;
+    return *this;
+  }
+  bool expired() const noexcept {
+    if (cb->shared_count == 0) {
+      return true;
     }
-
-    WeakPtr() = default;
-
-    template <typename Y>
-    WeakPtr(const SharedPtr<Y>& ptr) : ptr(ptr.cblock) {
-        this->ptr->weakc++;
+    return false;
+  }
+  int use_count() const { return cb->shared_count; }
+  SharedPtr<T> lock() const noexcept { return SharedPtr<T>(*this); }
+  ~WeakPtr() {
+    --(cb->weak_count);
+    if (cb->weak_count == 0 && cb->shared_count == 0) {
+      cb->Deallocate(); 
     }
-
-    WeakPtr(const WeakPtr& ptr) : ptr(ptr.ptr) {
-        this->ptr->weakc++;
-    }
-
-    template <typename Y>
-    WeakPtr(const WeakPtr<Y>& ptr) : ptr(ptr.ptr) {
-        this->ptr->weakc++;
-    }
-
-    WeakPtr(WeakPtr&& ptr) : ptr(ptr.ptr) {
-        ptr.ptr = nullptr;
-    }
-
-    template <typename Y>
-    WeakPtr(WeakPtr<Y>&& ptr) : ptr(ptr.ptr) {
-        ptr.ptr = nullptr;
-    }
-
-    ~WeakPtr() {
-        if (ptr != nullptr) {
-            ptr->weakc--;
-            if (ptr->weakc == 0 && ptr->shc == 0) {
-                ptr->BDel();
-            }
-        }
-    }
-
-    WeakPtr& operator=(const WeakPtr& ptr) {
-        WeakPtr<U>(ptr).swap(*this);
-        return *this;
-    }
-
-    template <typename Y>
-    WeakPtr& operator=(const WeakPtr<Y>& ptr) {
-        WeakPtr<U>(ptr).swap(*this);
-        return *this;
-    }
-
-    WeakPtr& operator=(WeakPtr&& ptr) {
-        WeakPtr(std::move(ptr)).swap(*this);
-        return *this;
-    }
-
-    template <typename Y>
-    WeakPtr& operator=(WeakPtr<Y>&& ptr) {
-        WeakPtr<U>(std::move(ptr)).swap(*this);
-        return *this;
-    }
-
-    template <typename Y>
-    WeakPtr& operator=(const SharedPtr<Y>& ptr) {
-        WeakPtr<U>(ptr).swap(*this);
-        return *this;
-    }
-
-    bool expired() const {
-        if (ptr == nullptr) {
-            return true;
-        }
-        return ptr->shc == 0;
-    }
-
-    SharedPtr<U> lock() const {
-        if (ptr == nullptr) {
-            return SharedPtr<U>();
-        }
-        return SharedPtr<U>(ptr);
-    }
-
-    size_t use_count() const {
-        if (ptr == nullptr) {
-            return 0;
-        }
-        return ptr->shc;
-    }
+  }
 };
